@@ -85,6 +85,43 @@ local function extract_object(line_to_cursor)
   return current_object
 end
 
+local function get_current_argument_idx(line_to_cursor)
+  local comma_count = 0
+  local in_parenthesis = false
+
+  for i = 1, #line_to_cursor do
+    local char = line_to_cursor:sub(i, i)
+    if char == '(' then
+      in_parenthesis = true
+    elseif char == ')' then
+      in_parenthesis = false
+    elseif char == ',' and in_parenthesis then
+      comma_count = comma_count + 1
+    end
+  end
+
+  return comma_count + 1
+end
+
+local function split_signature(signature)
+  local args = {}
+  local start_idx = 1
+  local in_arg = false
+
+  for i = 1, #signature do
+    local char = signature:sub(i, i)
+    if char == ',' and not in_arg then
+      table.insert(args, vim.trim(signature:sub(start_idx, i - 1)))
+      start_idx = i + 1
+    elseif char == '(' or char == ')' then
+      in_arg = not in_arg
+    end
+  end
+
+  table.insert(args, vim.trim(signature:sub(start_idx)))
+  return args
+end
+
 local function show_signature(object)
   if object ~= '' then
     local float = config.editor.signature.float
@@ -92,11 +129,33 @@ local function show_signature(object)
     get_method_signature(object, function(res)
       local signature = res:match '%((.+)%)'
       if signature then
+        local line, line_to_cursor = get_line_info()
+        local current_arg_idx = get_current_argument_idx(line_to_cursor)
+
+        local args = split_signature(signature)
+        local signature_text = table.concat(args, ', ')
+        local current_arg_start = 0
+        local current_arg_end = 0
+        local char_count = 0
+
+        for i, arg in ipairs(args) do
+          arg = vim.trim(arg)
+          if i == current_arg_idx then
+            current_arg_start = char_count
+            current_arg_end = char_count + #arg
+            break
+          end
+          char_count = char_count + #arg + 2 -- account for ", "
+        end
+
         if float then
-          local _, id = lsp_util.open_floating_preview({ signature }, 'supercollider', float_conf)
+          local bufnr, id = lsp_util.open_floating_preview({ signature_text }, 'supercollider', float_conf)
           hint_winid = id
+
+          -- Add highlight to the current argument
+          api.nvim_buf_add_highlight(bufnr, -1, 'ErrorMsg', 0, current_arg_start, current_arg_end)
         else
-          print(signature)
+          print(signature_text)
         end
       end
     end)
