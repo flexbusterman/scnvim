@@ -2,8 +2,6 @@
 ---@module scnvim.signature
 ---@local
 
---- TODO: refactor to use vim.diagnostic?
-
 local sclang = require 'scnvim.sclang'
 local config = require 'scnvim.config'
 local api = vim.api
@@ -17,31 +15,32 @@ local function get_method_signature(object, cb)
   sclang.eval(cmd, cb)
 end
 
-local function is_outside_of_statment(line, line_to_cursor)
+local function is_outside_of_statement(line, line_to_cursor)
+  if not line or not line_to_cursor then
+    return true
+  end
   local line_endswith = vim.endswith(line, ')') or vim.endswith(line, ';')
   local curs_line_endswith = vim.endswith(line_to_cursor, ')') or vim.endswith(line_to_cursor, ';')
   return line_endswith and curs_line_endswith
 end
 
 local function extract_objects_helper(str)
-  local objects = vim.split(str, '(', true)
-  -- split arguments
+  if not str then
+    return ''
+  end
+  local objects = vim.split(str, '(', { plain = true })
   objects = vim.tbl_map(function(s)
-    return vim.split(s, ',', true)
+    return vim.split(s, ',', { plain = true })
   end, objects)
   objects = vim.tbl_flatten(objects)
   objects = vim.tbl_map(function(s)
-    -- filter out empty strings (nvim 0.5.1 compatability fix, use
-    -- vim.split(..., {trimempty = true}) for nvim 0.6)
     if s == '' then
       return nil
     end
-    -- filter out strings
     s = vim.trim(s)
     if s:sub(1, 1) == '"' then
       return nil
     end
-    -- filter out trailing parens (from insert mode)
     s = s:gsub('%)', '')
     local obj_start = s:find '%u'
     return obj_start and s:sub(obj_start, -1)
@@ -56,42 +55,34 @@ local function extract_objects_helper(str)
   return ''
 end
 
-local function get_line_info()
-  local _, col = unpack(api.nvim_win_get_cursor(0))
-  local line = api.nvim_get_current_line()
-  local line_to_cursor = line:sub(1, col + 1)
-  return line, line_to_cursor
-end
+local function extract_object(line_to_cursor)
+  local object_stack = {}
+  local paren_count = 0
+  local current_object = ''
 
-local function extract_object()
-  local line, line_to_cursor = get_line_info()
-  -- outside of any statement
-  if is_outside_of_statment(line, line_to_cursor) then
-    return ''
-  end
-  -- inside a multiline call
-  if not line_to_cursor:find '%(' then
-    local lnum = vim.fn.searchpair('(', '', ')', 'bnzW')
-    if lnum > 0 then
-      local ok, res = pcall(api.nvim_buf_get_lines, 0, lnum - 1, lnum, true)
-      if ok then
-        line_to_cursor = res[1]
+  for i = 1, #line_to_cursor do
+    local char = line_to_cursor:sub(i, i)
+    if char == '(' then
+      paren_count = paren_count + 1
+      local obj = extract_objects_helper(line_to_cursor:sub(1, i))
+      if obj ~= '' then
+        table.insert(object_stack, obj)
+      end
+    elseif char == ')' then
+      paren_count = paren_count - 1
+      if paren_count < #object_stack then
+        table.remove(object_stack)
       end
     end
-  end
-  -- ignore completed calls
-  local ignore = line_to_cursor:match '%((.*)%)'
-  if ignore then
-    ignore = ignore .. ')'
-    line_to_cursor = line_to_cursor:gsub(vim.pesc(ignore), '')
-  end
-  line_to_cursor = line_to_cursor:match '.*%('
-  return extract_objects_helper(line_to_cursor)
-end
 
-local function ins_extract_object()
-  local _, line_to_cursor = get_line_info()
-  return extract_objects_helper(line_to_cursor)
+    if paren_count > 0 then
+      current_object = object_stack[#object_stack] or ''
+    else
+      current_object = ''
+    end
+  end
+
+  return current_object
 end
 
 local function show_signature(object)
@@ -112,43 +103,71 @@ local function show_signature(object)
   end
 end
 
+local function update_signature()
+  local line, line_to_cursor = get_line_info()
+  if not line or not line_to_cursor then
+    return
+  end
+  if is_outside_of_statement(line, line_to_cursor) then
+    M.close()
+    return
+  end
+
+  local object = extract_object(line_to_cursor)
+  if object ~= '' then
+    show_signature(object)
+  else
+    M.close()
+  end
+end
+
 local function close_signature()
-  vim.api.nvim_win_close(hint_winid, false)
-  hint_winid = nil
-end
-
---- Show signature from normal mode
-function M.show()
-  local ok, object = pcall(extract_object)
-  if ok then
-    pcall(show_signature, object)
-  end
-end
-
---- Show signature from insert mode
-function M.ins_show()
-  if vim.v.char == '(' then
-    local ok, object = pcall(ins_extract_object)
-    if ok then
-      pcall(show_signature, object)
-    end
-  end
-end
-
--- Close signature hint window
-function M.close()
   if hint_winid ~= nil and vim.api.nvim_win_is_valid(hint_winid) then
-    pcall(close_signature)
+    vim.api.nvim_win_close(hint_winid, false)
+    hint_winid = nil
   end
 end
 
--- Toggle signature hint window
+function M.show()
+  update_signature()
+end
+
+function M.ins_show()
+  local _, line_to_cursor = get_line_info()
+  if vim.v.char == '(' then
+    update_signature()
+  end
+end
+
+function M.close()
+  close_signature()
+end
+
 function M.toggle()
   if hint_winid ~= nil and vim.api.nvim_win_is_valid(hint_winid) then
-    pcall(close_signature)
+    close_signature()
   else
-    M.show()
+    update_signature()
   end
+end
+
+api.nvim_create_autocmd({ 'CursorMovedI', 'CursorMoved' }, {
+  callback = function()
+    update_signature()
+  end,
+})
+
+api.nvim_create_autocmd('TextChangedI', {
+  callback = function()
+    update_signature()
+  end,
+})
+
+function get_line_info()
+  local _, col = unpack(api.nvim_win_get_cursor(0))
+  local line = api.nvim_get_current_line()
+  local line_to_cursor = line:sub(1, col + 1)
+  return line, line_to_cursor
 end
 
 return M
